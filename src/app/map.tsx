@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
+import { ChatDock } from '@/components/chat/ChatDock';
 import { MapPanel } from '@/components/map/MapPanel';
 import { MapStatusPill } from '@/components/map/MapStatusPill';
 import { TopBar } from '@/components/map/TopBar';
@@ -32,6 +33,7 @@ export default function MapScreen() {
             onFacilityClick={(id) => tool.selectFacility(id, false)}
           />
           <MapStatusPill state={tool.state} />
+          {tool.trace && <ChatDock trace={tool.trace} facility={tool.selected} fullScreen={!wide} />}
         </View>
         <View style={wide ? styles.panelWide : styles.panelNarrow}>
           <MapPanel tool={tool} />
