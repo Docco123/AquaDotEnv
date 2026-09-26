@@ -7,6 +7,7 @@ import type { UpstreamFacility, UpstreamTrace } from '@/types';
 import { FacilityDetail } from '../detail/FacilityDetail';
 import { FacilityList } from '../list/FacilityList';
 import { GaugesStrip } from './GaugesStrip';
+import { ProtectCard } from './ProtectCard';
 import { SourcesFooter } from './SourcesFooter';
 import { SummaryCard } from './SummaryCard';
 
@@ -30,6 +31,7 @@ export function TraceResults({ trace, selected, filters, onSelect }: Props) {
   return (
     <FadeIn style={styles.stack}>
       <SummaryCard trace={trace} />
+      <ProtectCard trace={trace} />
       <Explainer trace={trace} facility={null} />
       <GaugesStrip gauges={trace.gauges} />
       <FacilityList model={filters} onSelect={onSelect} />

@@ -9,12 +9,26 @@ import { handleChat, handleChatRequest } from '../src/lib/ai/chatHandler';
 import type { ChatRequest, ChatStreamEvent } from '../src/lib/ai/chatTypes';
 import { readAiConfig } from '../src/lib/ai/config';
 import { buildFacilityDigest, buildTraceDigest } from '../src/lib/ai/digest';
+import { ACTION_HEADING } from '../src/lib/ai/prompt';
 import type { UpstreamFacility, UpstreamTrace } from '../src/types';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(`ASSERT FAILED: ${message}`);
   console.log(`  ok  ${message}`);
 }
+
+/** Phrases that mean the model declined to give guidance. */
+const REFUSAL = /cannot provide|can['\u2019]t provide|not able to/i;
+
+/** Bullet lines in the "What you should do" section, or in the whole answer if the heading is missing. */
+function actionBullets(text: string): string[] {
+  const at = text.indexOf(ACTION_HEADING);
+  const section = at < 0 ? text : text.slice(at + ACTION_HEADING.length).split(/\n## /)[0];
+  return section.split('\n').filter((line) => /^\s*[-*]\s+\S/.test(line));
+}
+
+const answerText = (events: ChatStreamEvent[]) =>
+  events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text).join('');
 
 function loadDotEnv(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -50,8 +64,8 @@ const trace: UpstreamTrace = {
     facility({ id: 'MA0101630', name: 'Chicopee Water Pollution Control', major: true, potw: true, group: 'major',
       compliance: 'snc', sncStatus: 'Effluent - Monthly Average Limit', qtrHistory: '____VVSSV_SSS',
       effluentExceedances1yr: 7, exceedancePollutants1yr: 'Total suspended solids, E. coli', formalActions: 2,
-      penalties: '$12,500', riverKm: 6.4, travelHours: 3.1,
-      risk: { score: 91, level: 'high', reasons: ['Significant noncompliance', '7 effluent exceedances in 12 months'] } }),
+      penalties: '$12,500', riverKm: 6.4, travelHours: 3.1, cso: true,
+      risk: { score: 91, level: 'high', reasons: ['Significant noncompliance', '7 effluent exceedances in 12 months', 'Has combined sewer overflow outfalls'] } }),
     facility({ id: 'MA0100455', name: 'Holyoke WPCF', major: true, potw: true, group: 'major', compliance: 'effluent',
       qtrHistory: '________V__V_', effluentExceedances1yr: 2, exceedancePollutants1yr: 'Ammonia', riverKm: 14.2,
       travelHours: 7.4, risk: { score: 64, level: 'elevated', reasons: ['2 effluent exceedances in 12 months'] } }),
@@ -165,13 +179,26 @@ async function main() {
   assert(events[events.length - 1]?.type === 'done', 'last event is done');
 
   console.log('4. Follow-up with history + selected facility');
-  const answer = events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text).join('');
+  const answer = answerText(events);
   const follow: ChatRequest = {
     messages: [...good.messages, { role: 'assistant', content: answer }, { role: 'user', content: 'How long would a spill from it take to reach me?' }],
     context: { digest, facility },
   };
   const second = await readEvents(handleChat(follow, env, signal));
   assert(second.sawDone && second.events.some((e) => e.type === 'done'), 'multi-turn follow-up streams to done');
+
+  console.log('5. Safety question gets actions, never a refusal');
+  const safety: ChatRequest = {
+    messages: [{ role: 'user', content: "How can I make myself and my family safe from what's upstream?" }],
+    context: { digest, facility: null },
+  };
+  const safe = await readEvents(handleChat(safety, env, signal));
+  const safeText = answerText(safe.events);
+  assert(safe.sawDone && safeText.length > 0, 'safety answer streams to done');
+  assert(!REFUSAL.test(safeText), 'no refusal phrases (cannot provide / can\'t provide / not able to)');
+  const bullets = actionBullets(safeText);
+  assert(bullets.length >= 3, `at least 3 action bullets (got ${bullets.length})`);
+  console.log(`   "${ACTION_HEADING}" heading present: ${safeText.includes(ACTION_HEADING) ? 'yes' : 'NO'}; words: ${safeText.split(/\s+/).filter(Boolean).length}`);
 }
 
 main().catch((e) => {

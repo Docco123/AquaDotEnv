@@ -10,14 +10,25 @@ import { readAiConfig } from '../src/lib/ai/config';
 import { loadGoogleCredentials } from '../src/lib/ai/credentials';
 import { buildFacilityDigest, buildTraceDigest } from '../src/lib/ai/digest';
 import { handleExplain, handleExplainRequest } from '../src/lib/ai/handler';
-import { buildPrompt } from '../src/lib/ai/prompt';
-import type { ExplainRequest } from '../src/lib/ai/types';
+import { ACTION_HEADING, buildPrompt } from '../src/lib/ai/prompt';
+import type { AiEnv, ExplainRequest, ExplainResponse } from '../src/lib/ai/types';
 import { parseMarkdownLite } from '../src/components/explain/parseMarkdownLite';
 import type { UpstreamFacility, UpstreamTrace } from '../src/types';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(`ASSERT FAILED: ${message}`);
   console.log(`  ok  ${message}`);
+}
+
+/** Phrases that mean the model declined to give guidance. */
+const REFUSAL = /cannot provide|can['\u2019]t provide|not able to/i;
+
+/** Bullet lines in the "What you should do" section (empty if the section is missing). */
+function actionBullets(text: string): string[] {
+  const at = text.indexOf(ACTION_HEADING);
+  if (at < 0) return [];
+  const section = text.slice(at + ACTION_HEADING.length).split(/\n## /)[0];
+  return section.split('\n').filter((line) => /^\s*[-*]\s+\S/.test(line));
 }
 
 function loadDotEnv(path: string): Record<string, string> {
@@ -54,8 +65,8 @@ const trace: UpstreamTrace = {
     facility({ id: 'MA0101630', name: 'Chicopee Water Pollution Control', major: true, potw: true, group: 'major',
       compliance: 'snc', sncStatus: 'Effluent - Monthly Average Limit', qtrHistory: '____VVSSV_SSS',
       effluentExceedances1yr: 7, exceedancePollutants1yr: 'Total suspended solids, E. coli', formalActions: 2,
-      penalties: '$12,500', riverKm: 6.4, travelHours: 3.1,
-      risk: { score: 91, level: 'high', reasons: ['Significant noncompliance', '7 effluent exceedances in 12 months'] } }),
+      penalties: '$12,500', riverKm: 6.4, travelHours: 3.1, cso: true,
+      risk: { score: 91, level: 'high', reasons: ['Significant noncompliance', '7 effluent exceedances in 12 months', 'Has combined sewer overflow outfalls'] } }),
     facility({ id: 'MA0100455', name: 'Holyoke WPCF', major: true, potw: true, group: 'major', compliance: 'effluent',
       qtrHistory: '________V__V_', effluentExceedances1yr: 2, exceedancePollutants1yr: 'Ammonia', riverKm: 14.2,
       travelHours: 7.4, risk: { score: 64, level: 'elevated', reasons: ['2 effluent exceedances in 12 months'] } }),
@@ -78,6 +89,26 @@ const trace: UpstreamTrace = {
   sources: ['EPA ECHO CWA facility search', 'USGS NLDI upstream navigation', 'USGS Water Services IV'],
 };
 
+/** Calls the model and checks the answer gives guidance: action section with 3-5 bullets, no refusal. */
+async function checkRealExplain(label: string, request: ExplainRequest, env: AiEnv, wordLimit: number) {
+  const started = Date.now();
+  const real = await handleExplain(request, env);
+  console.log(`   HTTP ${real.status} in ${Date.now() - started} ms`);
+  if (!('text' in real.body)) console.log(`   ${JSON.stringify(real.body)}`);
+  assert(real.status === 200 && 'text' in real.body, `${label}: model answered`);
+  const { text, model, usage, truncated } = real.body as ExplainResponse;
+  console.log(`   model=${model} truncated=${!!truncated} usage=${JSON.stringify(usage)}`);
+  console.log(`\n   ${label.toUpperCase()} ANSWER:\n${text}\n`);
+  const words = text.split(/\s+/).filter(Boolean).length;
+  console.log(`   words: ${words} (limit ${wordLimit})`);
+  console.log(`   mentions an invented agency name: ${/Department of|DEP\b|DEQ\b/.test(text) ? 'YES' : 'no'}`);
+  console.log(`   mentions a combined total (5 permits): ${/\b5 (active )?(permits|facilities)/.test(text) ? 'YES' : 'no'}`);
+  assert(!truncated, `${label}: not cut off at the token limit`);
+  assert(!REFUSAL.test(text), `${label}: no refusal phrases`);
+  const bullets = actionBullets(text);
+  assert(bullets.length >= 3 && bullets.length <= 5, `${label}: "${ACTION_HEADING}" has 3-5 bullets (got ${bullets.length})`);
+}
+
 async function main() {
   console.log('1. Digest + prompt (pure)');
   const digest = buildTraceDigest(trace);
@@ -95,8 +126,13 @@ async function main() {
   assert(fd.registryId === '110000000000' && fd.quarterHistory.length === 13, 'facility digest has full fields');
   const request: ExplainRequest = { kind: 'trace', digest };
   const prompt = buildPrompt(request);
-  assert(prompt.systemInstruction.includes("## Who's breaking the rules"), 'trace prompt has required sections');
-  assert(buildPrompt({ kind: 'facility', digest, facility: fd }).systemInstruction.includes('## Watch for'), 'facility prompt has required sections');
+  const facilityPrompt = buildPrompt({ kind: 'facility', digest, facility: fd }).systemInstruction;
+  assert(prompt.systemInstruction.includes("## Who's breaking the rules") && prompt.systemInstruction.includes(ACTION_HEADING), 'trace prompt has required sections');
+  assert(facilityPrompt.includes('## Its record') && facilityPrompt.includes(ACTION_HEADING), 'facility prompt has required sections');
+  for (const text of [prompt.systemInstruction, facilityPrompt]) {
+    assert(!/no legal or medical advice|do not claim health effects/i.test(text), 'no blanket no-advice rule');
+    assert(text.includes('not a medical diagnosis') && text.includes('SHOULD recommend concrete protective actions'), 'protective guidance present');
+  }
   console.log(`  digest bytes: ${JSON.stringify(digest).length}, prompt chars: ${prompt.systemInstruction.length + prompt.userText.length}`);
   const blocks = parseMarkdownLite('## Title\n- **Bold** item\nPlain');
   assert(blocks.length === 3 && blocks[1].type === 'bullet' && blocks[1].spans[0].bold, 'markdown-lite parser');
@@ -130,15 +166,10 @@ async function main() {
       }
     }
   }
-  const started = Date.now();
-  const real = await handleExplain(request, env);
-  console.log(`   HTTP ${real.status} in ${Date.now() - started} ms`);
-  console.log(JSON.stringify(real.body, null, 2));
-  if ('text' in real.body) {
-    const text = real.body.text;
-    console.log(`   mentions an invented agency name: ${/Department of|DEP\b|DEQ\b/.test(text) ? 'YES' : 'no'}`);
-    console.log(`   mentions a combined total (5 permits): ${/\b5 (active )?(permits|facilities)/.test(text) ? 'YES' : 'no'}`);
-  }
+  await checkRealExplain('trace', request, env, 260);
+
+  console.log('4. Real call for one facility');
+  await checkRealExplain('facility', { kind: 'facility', digest, facility: fd }, env, 240);
 }
 
 main().catch((e) => {
