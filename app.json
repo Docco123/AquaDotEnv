@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "npdes-watershed-map",
-    "slug": "npdes-watershed-map",
+    "name": "UpstreamWatch",
+    "slug": "upstreamwatch",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -19,7 +19,17 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "output": "server",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font"
+    ],
+    "scheme": "upstreamwatch",
+    "experiments": {
+      "typedRoutes": true
     }
   }
 }
